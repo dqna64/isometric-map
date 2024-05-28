@@ -1,6 +1,9 @@
 import React, { useRef, useEffect } from "react";
 
-export type CanvasProps = {
+/**
+ * @deprecated
+ */
+type CanvasProps = {
     drawOnCanvas: (ctx: CanvasRenderingContext2D) => void;
     onWheel: (ctx: CanvasRenderingContext2D, e: WheelEvent) => void;
     onMouseMove: (ctx: CanvasRenderingContext2D, e: MouseEvent) => void;
@@ -8,6 +11,9 @@ export type CanvasProps = {
     attributes?: React.CanvasHTMLAttributes<HTMLCanvasElement>;
 };
 
+/**
+ * @deprecated
+ */
 const Canvas = ({
     drawOnCanvas,
     onWheel,

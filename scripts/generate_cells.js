@@ -1,16 +1,13 @@
-const cells = [];
+let generateKey = ({ x, y }) => `${x},${y}`;
+let cells = {};
 
-for (let x = -40; x < 40; x++) {
-    for (let y = -40; y < 40; y++) {
-        cells.push({
-            coordinates: {
-                x,
-                y,
-            },
+for (let x = -25; x < 25; x++) {
+    for (let y = -25; y < 25; y++) {
+        cells[generateKey({ x, y })] = {
             owner: null,
             object: null,
-        });
+        };
     }
 }
 
-console.dir(cells, { depth: null });
+console.log(cells);

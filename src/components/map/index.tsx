@@ -1,15 +1,20 @@
-import React, { useCallback, useRef, useEffect } from "react";
+import { useCallback, useRef, useEffect } from "react";
 import { getTileImages } from "./tiles/get-tile-images";
 import Tile, { Pos2D } from "./tiles/tile";
-import { worldMap as WORLD_MAP } from "../../map_state_1";
-import { CellJSON, Coordinates } from "../../types";
+import { worldMap as WORLD_MAP, assets as ASSETS } from "../../map_state_1";
+import {
+    CellJSON,
+    CellsType,
+    CoordStr,
+    Coordinates,
+    Dimensions,
+    isCoordStr,
+} from "../../types";
+import EnvironObject from "./tiles/object";
 
+const DEBUG1 = false;
+export const DEBUG_MAP_VIS = true;
 export type MapProps = {};
-
-export type MapSizeType = {
-    width: number | undefined;
-    height: number | undefined;
-};
 
 export interface IKeys {
     left: boolean;
@@ -30,27 +35,27 @@ const DEFAULT_MAP_SCALE = 1;
 const DEFAULT_DELTA_X = 1;
 // Set temporarily (Should be changed once the requirements for UI/UX are all determined)
 const ZOOM_SENSITIVITY = 0.0002;
-const MAX_SCALE = 2.4;
-const MIN_SCALE = 0.6;
+const MAX_SCALE = 2.6;
+const MIN_SCALE = 0.4;
 const HORIZONTAL_SCROLL_SENSITIVITY = 0.05;
 
 // TODO: FIGURE OUT HOW THIS IS DETERMINED
-const MAGIC_NUMBER_TO_ADJUST = 80;
+const MAGIC_NUMBER_TO_ADJUST = 0;
 
-const TILE_MAP = [
-    [14, 23, 23, 23, 23, 23, 23, 23, 23, 13],
-    [21, 32, 33, 33, 28, 33, 33, 33, 31, 20],
-    [21, 34, 9, 9, 34, 1, 1, 1, 34, 20],
-    [21, 34, 4, 4, 34, 1, 1, 10, 34, 20],
-    [21, 25, 33, 33, 24, 33, 33, 33, 27, 20],
-    [21, 34, 4, 7, 34, 18, 17, 10, 34, 20],
-    [21, 34, 6, 8, 34, 16, 19, 10, 34, 20],
-    [21, 34, 1, 1, 34, 10, 10, 10, 34, 20],
-    [21, 29, 33, 33, 26, 33, 33, 33, 30, 20],
-    [11, 22, 22, 22, 22, 22, 22, 22, 22, 12],
-];
+// const TILE_MAP = [
+//     [14, 23, 23, 23, 23, 23, 23, 23, 23, 13],
+//     [21, 32, 33, 33, 28, 33, 33, 33, 31, 20],
+//     [21, 34, 9, 9, 34, 1, 1, 1, 34, 20],
+//     [21, 34, 4, 4, 34, 1, 1, 10, 34, 20],
+//     [21, 25, 33, 33, 24, 33, 33, 33, 27, 20],
+//     [21, 34, 4, 7, 34, 18, 17, 10, 34, 20],
+//     [21, 34, 6, 8, 34, 16, 19, 10, 34, 20],
+//     [21, 34, 1, 1, 34, 10, 10, 10, 34, 20],
+//     [21, 29, 33, 33, 26, 33, 33, 33, 30, 20],
+//     [11, 22, 22, 22, 22, 22, 22, 22, 22, 12],
+// ];
 
-const DEFAULT_ZOOM_MATRIX = DOMMatrix.fromFloat64Array(
+const DEFAULT_TRANSFORM_MATRIX = DOMMatrix.fromFloat64Array(
     new Float64Array([1, 0, 0, 1, 0, 0])
 );
 
@@ -64,26 +69,40 @@ const VEL_DAMPER = 0.94; // 0.9 means 90% of velocity is kept each frame
 
 const WorldMap = ({}: MapProps) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const mouseRawRef = useRef({ x: -1, y: -1 });
-    const originRawRef = useRef({ x: -1, y: -1 });
+
+    // Coords of the mouse relative to the top-left of canvas,
+    // raw ie before panzoom transformation
+    const mouseRaw = useRef<Pos2D>({ x: -1, y: -1 });
+
+    // Coords of the origin of the map, raw ie before panzoom transformation
+    // Derived from canvas size
+    // const originRaw = useRef({ x: -1, y: -1 });
+
     // Transform matrix to represent pan (translate) and zoom (scale).
     // Default translate (0,0), zoom scale 1
-    const transformMat = useRef(DEFAULT_ZOOM_MATRIX);
+    const transformMat = useRef(DEFAULT_TRANSFORM_MATRIX);
+    // Used to check whether transformMat has changed
+    const prevTransformMat = useRef<DOMMatrix | null>(null);
+
     // Translation speed in distance units per second
-    const velocityRef = useRef({ x: 0, y: 0 });
-    const [tileMap, setTileMap] = React.useState(TILE_MAP);
-    const cells = useRef<Map<string, CellJSON>>(
+    const vel = useRef({ x: 0, y: 0 });
+
+    // const [tileMap, setTileMap] = React.useState(TILE_MAP);
+    const tileMap = useRef<Map<CoordStr, CellJSON>>(
         new Map(
-            WORLD_MAP.cells.map((cell) => [generateKey(cell.coordinates), cell])
+            Object.entries(WORLD_MAP.cells).filter(([k]) => isCoordStr(k)) as [
+                CoordStr,
+                CellJSON
+            ][]
         )
     );
 
     // TODO: update when new cells are added or cells are removed
-    const rangeRef = useRef<IRange>(findRange(cells.current));
+    const tileMapRange = useRef<IRange>(findRange(tileMap.current));
 
-    const [images, setImages] = React.useState<HTMLImageElement[]>(
-        getTileImages()
-    );
+    const images = useRef<HTMLImageElement[]>(getTileImages());
+    const assets = useRef(new Map(ASSETS.map((asset) => [asset.id, asset])));
+
     const keyRef = useRef<IKeys>({
         left: false,
         up: false,
@@ -99,40 +118,15 @@ const WorldMap = ({}: MapProps) => {
     const startTimestamp = useRef<DOMHighResTimeStamp>(0);
     const prevTimestamp = useRef<DOMHighResTimeStamp>(0);
 
-    // TODO: remove this constraint
-    useEffect(() => {
-        if (tileMap.length !== tileMap[0].length) {
-            throw new Error("Tile map should be square");
-        }
-    }, [tileMap]);
-
     console.log("Render Map");
 
     // This shows which tile image should be displayed(index of TILE_TEXTURES fetched by getTileImages())
 
-    const renderTileHover = useCallback(
-        (ctx: CanvasRenderingContext2D) => (x: number, y: number) => {
-            ctx.beginPath();
-            ctx.setLineDash([]);
-            ctx.strokeStyle = "rgba(192, 57, 43, 0.8)";
-            ctx.fillStyle = "rgba(192, 57, 43, 0.4)";
-            ctx.lineWidth = 2;
-            ctx.moveTo(x, y);
-            ctx.lineTo(x + Tile.TILE_WIDTH / 2, y - Tile.TILE_HEIGHT / 2);
-            ctx.lineTo(x + Tile.TILE_WIDTH, y);
-            ctx.lineTo(x + Tile.TILE_WIDTH / 2, y + Tile.TILE_HEIGHT / 2);
-            ctx.lineTo(x, y);
-            ctx.stroke();
-            ctx.fill();
-        },
-        []
-    );
-
     const renderTiles = useCallback(
-        (ctx: CanvasRenderingContext2D) => (x: number, y: number) => {
-            const gridSize = tileMap.length;
-
-            ctx.setTransform(transformMat.current);
+        (ctx: CanvasRenderingContext2D) => {
+            if (!canvasRef.current) return;
+            const canvasSize = getCanvasSize(canvasRef.current);
+            const originRaw = getOriginRaw(canvasSize);
 
             // for (let tileX = 0; tileX < gridSize; ++tileX) {
             // 	for (let tileY = 0; tileY < gridSize; ++tileY) {
@@ -148,82 +142,241 @@ const WorldMap = ({}: MapProps) => {
             // 	}
             // }
 
+            const grassLayer: Tile[] = [];
+            const objectLayer: EnvironObject[] = [];
+
+            const coordsOrder: Pos2D[] = [];
+            const minX = tileMapRange.current.minX;
+            const minY = tileMapRange.current.minY;
+            const maxX = tileMapRange.current.maxX;
+            const maxY = tileMapRange.current.maxY;
+            for (let startY = minY; startY <= maxY; ++startY) {
+                let curX = minX;
+                let curY = startY;
+                while (curY >= minY && curX <= maxX) {
+                    coordsOrder.push({ x: curX, y: curY });
+                    curX += 1;
+                    curY -= 1;
+                }
+            }
+            for (let startX = minX; startX <= maxX; ++startX) {
+                let curX = startX;
+                let curY = maxY;
+                while (curX <= maxX && curY >= minY) {
+                    coordsOrder.push({ x: curX, y: curY });
+                    curX += 1;
+                    curY -= 1;
+                }
+            }
+
             for (
-                let tileX = rangeRef.current.minX;
-                tileX <= rangeRef.current.maxX;
+                let tileX = tileMapRange.current.minX;
+                tileX <= tileMapRange.current.maxX;
                 ++tileX
             ) {
                 for (
-                    let tileY = rangeRef.current.minY;
-                    tileY <= rangeRef.current.maxY;
+                    let tileY = tileMapRange.current.minY;
+                    tileY <= tileMapRange.current.maxY;
                     ++tileY
-                ) {
-                    const tile: Tile = new Tile({
-                        tileImage: images[4],
-                        mapStartPosition: { x, y },
-                        tileIndex: { x: tileX, y: tileY },
-                        ctx,
-                    });
-                    tile.drawTile(MAGIC_NUMBER_TO_ADJUST);
+                ) {}
+            }
+            for (let { x: tileX, y: tileY } of coordsOrder) {
+                const cellKey = serializeCoordStr({ x: tileX, y: tileY });
+                const cell = tileMap.current.get(cellKey);
+                if (cell !== undefined) {
+                    if (cell.object !== null) {
+                        const asset = assets.current.get(cell.object);
+                        if (asset !== undefined) {
+                            let imageEl = asset.imageEl;
+                            if (imageEl === null) {
+                                const finalRemoteImage =
+                                    asset.remoteImages.at(-1);
+                                if (finalRemoteImage !== undefined) {
+                                    imageEl = new Image();
+                                    imageEl.src = finalRemoteImage.url;
+                                    asset.imageEl = imageEl;
+                                    // asset.imageEl.onload = (ev) => {
+                                    //     if (ev.target === null) {
+                                    //         console.error(
+                                    //             `Image with key ${cell.object} is not loaded`
+                                    //         );
+                                    //     } else if (
+                                    //         ev.target instanceof
+                                    //         HTMLImageElement
+                                    //     ) {
+                                    //         const tile: Tile = new Tile({
+                                    //             tileImage: ev.target,
+                                    //             mapStartPosition: originRaw,
+                                    //             tileIndex: {
+                                    //                 x: tileX,
+                                    //                 y: tileY,
+                                    //             },
+                                    //             ctx,
+                                    //         });
+                                    //         console.log(
+                                    //             `Drawing image ${cell.object} at ${cellKey}`
+                                    //         );
+
+                                    //         tile.drawTile(
+                                    //             MAGIC_NUMBER_TO_ADJUST
+                                    //         );
+                                    //     }
+                                    // };
+                                } else {
+                                    console.error(
+                                        `Asset ${asset.id} has no remote images`
+                                    );
+                                    continue;
+                                }
+                            } else {
+                                const environObject: EnvironObject =
+                                    new EnvironObject({
+                                        tileImage: imageEl,
+                                        mapStartPosition: originRaw,
+                                        tilePos: {
+                                            x: tileX,
+                                            y: tileY,
+                                        },
+                                        dimensions: asset.dimensions,
+                                        ctx,
+                                    });
+                                if (DEBUG1) {
+                                    console.log(
+                                        `Drawing image ${cell.object} at ${cellKey}`
+                                    );
+                                    console.log(`Image: ${imageEl.src}`);
+                                }
+
+                                objectLayer.push(environObject);
+                            }
+                        } else {
+                            console.error(
+                                `Asset with key ${cell.object} not found in assets`
+                            );
+                        }
+                    } else {
+                        const grassImage = images.current[1];
+                        const tile: Tile = new Tile({
+                            tileImage: grassImage,
+                            mapStartPosition: originRaw,
+                            tileIndex: { x: tileX, y: tileY },
+                            ctx,
+                        });
+                        grassLayer.push(tile);
+                    }
+                } else {
+                    // cell does not have a Cell with key {x: tileX, y: tileY}
                 }
             }
+
+            for (const tile of grassLayer) {
+                tile.drawTile(MAGIC_NUMBER_TO_ADJUST);
+            }
+
+            for (
+                let tileX = tileMapRange.current.minX;
+                tileX <= tileMapRange.current.maxX;
+                ++tileX
+            ) {
+                for (
+                    let tileY = tileMapRange.current.minY;
+                    tileY <= tileMapRange.current.maxY;
+                    ++tileY
+                ) {
+                    let renderX =
+                        originRaw.x + (tileX - tileY) * Tile.TILE_HALF_WIDTH;
+                    let renderY =
+                        originRaw.y + (tileX + tileY) * Tile.TILE_HALF_HEIGHT;
+
+                    if (DEBUG_MAP_VIS) {
+                        // drawPoint(ctx, { x: renderX, y: renderY }, "black", 3);
+                    }
+                    drawTileOutline(
+                        ctx,
+                        { x: renderX, y: renderY },
+                        { width: Tile.TILE_WIDTH, height: Tile.TILE_HEIGHT }
+                    );
+                    if (DEBUG_MAP_VIS) {
+                        //     if (tileX % 2 === 0 && tileY % 2 === 0)
+                        //         drawSquare(
+                        //             ctx,
+                        //             { x: renderX, y: renderY - Tile.UNIT_HALF },
+                        //             {
+                        //                 width: Tile.TILE_WIDTH,
+                        //                 height: Tile.TILE_HEIGHT,
+                        //             },
+                        //             `rgba(128, 206, 242,0.8)`
+                        //         );
+                    }
+                }
+            }
+
+            for (const environObject of objectLayer) {
+                environObject.drawTile(MAGIC_NUMBER_TO_ADJUST);
+            }
+
+            // === Draw mouse hover tile ===
+            drawPoint(ctx, originRaw, "yellow");
+
             const mouseTransformed = getTransformedPoint(
                 transformMat.current,
-                mouseRawRef.current.x,
-                mouseRawRef.current.y
+                mouseRaw.current.x,
+                mouseRaw.current.y
             );
 
-            const mouseFromTransOrigin: Pos2D = {
-                x: mouseTransformed.x - x - 0 * ctx.getTransform().e,
-                y: mouseTransformed.y - y - 0 * ctx.getTransform().f,
+            const mouseRelativeToRawOrigin: Pos2D = {
+                x: mouseTransformed.x - originRaw.x,
+                y: mouseTransformed.y - originRaw.y,
+                // x: mouseTransformed.x - x - 0 * ctx.getTransform().e,
+                // y: mouseTransformed.y - y - 0 * ctx.getTransform().f,
             };
 
-            const hoverTileX =
-                Math.floor(
-                    mouseFromTransOrigin.y / Tile.TILE_HEIGHT +
-                        mouseFromTransOrigin.x / Tile.TILE_WIDTH
-                ) - 1;
-            const hoverTileY = Math.floor(
-                -mouseFromTransOrigin.x / Tile.TILE_WIDTH +
-                    mouseFromTransOrigin.y / Tile.TILE_HEIGHT
+            // drawPoint(ctx, mouseRaw.current, "orange");
+            drawPoint(ctx, mouseTransformed, "lavender");
+
+            const hoverTileX = Math.floor(
+                mouseRelativeToRawOrigin.y / Tile.TILE_HEIGHT +
+                    mouseRelativeToRawOrigin.x / Tile.TILE_WIDTH
             );
+            const hoverTileY =
+                Math.floor(
+                    -mouseRelativeToRawOrigin.x / Tile.TILE_WIDTH +
+                        mouseRelativeToRawOrigin.y / Tile.TILE_HEIGHT
+                ) + 1;
 
             if (
-                cells.current.has(
-                    generateKey({
+                tileMap.current.has(
+                    serializeCoordStr({
                         x: hoverTileX,
                         y: hoverTileY,
                     })
                 )
             ) {
+                if (DEBUG1)
+                    console.log(
+                        `Hovering over tile ${hoverTileX}, ${hoverTileY}`
+                    );
                 const renderX =
-                    x + (hoverTileX - hoverTileY) * Tile.TILE_HALF_WIDTH;
+                    originRaw.x +
+                    (hoverTileX - hoverTileY) * Tile.TILE_HALF_WIDTH;
                 const renderY =
-                    y + (hoverTileX + hoverTileY) * Tile.TILE_HALF_HEIGHT;
+                    originRaw.y +
+                    (hoverTileX + hoverTileY) * Tile.TILE_HALF_HEIGHT;
 
-                renderTileHover(ctx)(renderX, renderY + Tile.TILE_HEIGHT);
+                renderTileHover(ctx, renderX, renderY);
             }
-
-            // Restore normal transform
-            ctx.restore();
-            // ctx.setTransform(DEFAULT_ZOOM_MATRIX);
         },
-        [tileMap, images]
+        [images]
     );
 
     const renderBackground = useCallback(
-        (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+        (ctx: CanvasRenderingContext2D, canvasSize: Dimensions) => {
             // Can/Should change the color once UI design is determined
             ctx.fillStyle = "#151d26";
 
-            // Save normal transformation matrix (done in useEffect prior
-            // to starting rendering loop)
-            // ctx.setTransform(DOMMatrix.fromMatrix(DEFAULT_ZOOM_MATRIX));
-            ctx.save();
-
             // If render background using canvas width and height, must
             // reset canvase transformation matrix to normal before rendering.
-            ctx.fillRect(0, 0, width, height);
+            ctx.fillRect(0, 0, canvasSize.width, canvasSize.height);
 
             // ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
         },
@@ -231,33 +384,44 @@ const WorldMap = ({}: MapProps) => {
     );
 
     const render = useCallback(
-        (
-            ctx: CanvasRenderingContext2D,
-            canvasSize: { width: number; height: number }
-        ) => {
+        (ctx: CanvasRenderingContext2D) => {
             // if (!canvasSize.width || !canvasSize.height) return;
             if (!canvasRef.current) return;
+            const canvasSize = getCanvasSize(canvasRef.current);
 
-            const gridSize = tileMap.length;
+            if (DEBUG1) console.log(`Render`);
 
-            const offsetX = Tile.TILE_WIDTH / 2;
-            const offsetY = Tile.TILE_HEIGHT;
+            // const offsetX = Tile.TILE_WIDTH / 2;
+            // const offsetY = Tile.TILE_HEIGHT;
 
-            const remainingHeight =
-                canvasSize.height - Tile.TILE_HEIGHT * gridSize;
-
-            const tileStartX = canvasSize.width / 2 - offsetX;
+            // minus offsetX and offsetY so that tile (0,0) is at center of
+            // canvas assuming no transformations
+            // const tileStartX = canvasSize.width / 2 - offsetX;
             // MAGIC_NUMBER_TO_ADJUST is to adjust position when calling Tile.drawTile()
-            const tileStartY =
-                remainingHeight / 2 + offsetY - MAGIC_NUMBER_TO_ADJUST;
+            // const tileStartY =
+            //     canvasSize.height / 2 - offsetY - MAGIC_NUMBER_TO_ADJUST;
 
-            originRawRef.current = { x: tileStartX, y: tileStartY };
+            if (
+                !checkTransformMatChanged(
+                    prevTransformMat.current,
+                    transformMat.current
+                )
+            ) {
+                if (DEBUG1) console.log("Transform matrix not changed");
+                // return;
+            }
 
-            renderBackground(ctx, canvasSize.width, canvasSize.height);
+            // Save normal transformation matrix (done in useEffect prior
+            // to starting rendering loop)
+            // ctx.setTransform(DOMMatrix.fromMatrix(DEFAULT_ZOOM_MATRIX));
+            ctx.save();
+            renderBackground(ctx, canvasSize);
 
-            renderTiles(ctx)(tileStartX, tileStartY);
+            ctx.setTransform(transformMat.current);
+            renderTiles(ctx);
+            ctx.restore();
         },
-        [originRawRef, renderBackground, renderTiles]
+        [renderBackground, renderTiles]
     );
 
     const onScrollY = useCallback(
@@ -270,10 +434,10 @@ const WorldMap = ({}: MapProps) => {
                 transformMat.current,
                 // e.offsetX,
                 // e.clientX - ctx.canvas.getBoundingClientRect().left,
-                mouseRawRef.current.x,
+                mouseRaw.current.x,
                 // e.offsetY
                 // e.clientY - ctx.canvas.getBoundingClientRect().top
-                mouseRawRef.current.y
+                mouseRaw.current.y
             );
 
             // When reaching MAX_SCALE, it only allows zoom OUT (= negative zoomAmount)
@@ -344,22 +508,21 @@ const WorldMap = ({}: MapProps) => {
         (ctx: CanvasRenderingContext2D, e: MouseEvent) => {
             const rect = ctx.canvas.getBoundingClientRect();
 
-            mouseRawRef.current = {
-                x: e.clientX - rect.left,
-                y: e.clientY - rect.top,
+            mouseRaw.current = {
+                x: e.clientX - rect.x,
+                y: e.clientY - rect.y,
             };
         },
-        [mouseRawRef]
+        [mouseRaw]
     );
 
     const onClick = useCallback(
         (ctx: CanvasRenderingContext2D, e: MouseEvent) => {
-            const gridSize = tileMap.length;
-
             const { e: xPos, f: yPos } = ctx.getTransform();
+            const originRaw = getOriginRaw(getCanvasSize(ctx.canvas));
 
-            const mouse_x = e.clientX - originRawRef.current.x - xPos;
-            const mouse_y = e.clientY - originRawRef.current.y - yPos;
+            const mouse_x = e.clientX - originRaw.x - xPos;
+            const mouse_y = e.clientY - originRaw.y - yPos;
 
             const hoverTileX =
                 Math.floor(
@@ -369,16 +532,20 @@ const WorldMap = ({}: MapProps) => {
                 -mouse_x / Tile.TILE_WIDTH + mouse_y / Tile.TILE_HEIGHT
             );
 
+            console.log({ hoverTileX, hoverTileY });
+
             if (
-                hoverTileX >= 0 &&
-                hoverTileY >= 0 &&
-                hoverTileX < gridSize &&
-                hoverTileY < gridSize
+                tileMap.current.has(
+                    serializeCoordStr({
+                        x: hoverTileX,
+                        y: hoverTileY,
+                    })
+                )
             ) {
                 // Do something with the tile
             }
         },
-        [tileMap, originRawRef]
+        []
     );
 
     useEffect(() => {
@@ -390,7 +557,7 @@ const WorldMap = ({}: MapProps) => {
 
         // Save current transformation matrix (normal). Will be restored after
         // rendering tiles each draw cycle to draw background properly.
-        // context.save();
+        context.save();
 
         console.log("Canvas useEffect");
 
@@ -408,40 +575,38 @@ const WorldMap = ({}: MapProps) => {
             delta: DOMHighResTimeStamp
         ) => {
             if (keyRef.current.left) {
-                velocityRef.current.x += ACCEL;
+                vel.current.x += ACCEL;
             }
             if (keyRef.current.right) {
-                velocityRef.current.x -= ACCEL;
+                vel.current.x -= ACCEL;
             }
             if (!keyRef.current.left && !keyRef.current.right) {
-                velocityRef.current.x *= VEL_DAMPER;
+                vel.current.x *= VEL_DAMPER;
             }
-            if (Math.abs(velocityRef.current.x) > MAX_VEL) {
-                velocityRef.current.x =
-                    getSign(velocityRef.current.x) * MAX_VEL;
-            } else if (Math.abs(velocityRef.current.x) < MIN_VEL) {
-                velocityRef.current.x = 0;
+            if (Math.abs(vel.current.x) > MAX_VEL) {
+                vel.current.x = getSign(vel.current.x) * MAX_VEL;
+            } else if (Math.abs(vel.current.x) < MIN_VEL) {
+                vel.current.x = 0;
             }
 
             if (keyRef.current.up) {
-                velocityRef.current.y += ACCEL;
+                vel.current.y += ACCEL;
             }
             if (keyRef.current.down) {
-                velocityRef.current.y -= ACCEL;
+                vel.current.y -= ACCEL;
             }
             if (!keyRef.current.up && !keyRef.current.down) {
-                velocityRef.current.y *= VEL_DAMPER;
+                vel.current.y *= VEL_DAMPER;
             }
-            if (Math.abs(velocityRef.current.y) > MAX_VEL) {
-                velocityRef.current.y =
-                    getSign(velocityRef.current.y) * MAX_VEL;
-            } else if (Math.abs(velocityRef.current.y) < MIN_VEL) {
-                velocityRef.current.y = 0;
+            if (Math.abs(vel.current.y) > MAX_VEL) {
+                vel.current.y = getSign(vel.current.y) * MAX_VEL;
+            } else if (Math.abs(vel.current.y) < MIN_VEL) {
+                vel.current.y = 0;
             }
 
             const displacement = {
-                x: velocityRef.current.x * delta,
-                y: velocityRef.current.y * delta,
+                x: vel.current.x * delta,
+                y: vel.current.y * delta,
             };
             transformMat.current.translateSelf(displacement.x, displacement.y);
         };
@@ -456,16 +621,14 @@ const WorldMap = ({}: MapProps) => {
             const delta = timestamp - prevTimestamp.current;
             update(context, elapsed, delta);
 
-            if (canvasRef.current) {
-                const canvasSize = {
-                    width: canvasRef.current.width,
-                    height: canvasRef.current.height,
-                };
-
-                render(context, canvasSize);
-            }
+            render(context);
             requestAnimationFrame(draw);
+
             prevTimestamp.current = timestamp;
+            // create copy
+            prevTransformMat.current = DOMMatrix.fromMatrix(
+                transformMat.current
+            );
             // animationFrameId = requestAnimationFrame(draw)
         };
         draw(performance.now());
@@ -599,16 +762,27 @@ export const getTilePosition = (
 const getSign = (value: number) => (value >= 0 ? 1 : -1);
 
 // expects x and y to be integers
-const generateKey = ({ x, y }: { x: number; y: number }) => `${x},${y}`;
+export const serializeCoordStr = ({
+    x,
+    y,
+}: {
+    x: number;
+    y: number;
+}): CoordStr => `${x},${y}`;
 
-const findRange = (cells: Map<string, CellJSON>): IRange => {
+export const parseCoordStr = (coordStr: CoordStr): Coordinates => {
+    const [x, y] = coordStr.split(",").map((str) => parseInt(str));
+    return { x, y };
+};
+
+const findRange = (cells: Map<CoordStr, CellJSON>): IRange => {
     let minX = Number.MAX_SAFE_INTEGER;
     let minY = Number.MAX_SAFE_INTEGER;
     let maxX = Number.MIN_SAFE_INTEGER;
     let maxY = Number.MIN_SAFE_INTEGER;
 
-    for (const cell of cells.values()) {
-        const { x, y } = cell.coordinates;
+    for (const coordStr of cells.keys()) {
+        const { x, y } = parseCoordStr(coordStr);
         if (x < minX) minX = x;
         if (y < minY) minY = y;
         if (x > maxX) maxX = x;
@@ -616,4 +790,145 @@ const findRange = (cells: Map<string, CellJSON>): IRange => {
     }
 
     return { minX, minY, maxX, maxY };
+};
+
+const getCanvasSize = (canvas: HTMLCanvasElement): Dimensions => {
+    return {
+        width: canvas.width,
+        height: canvas.height,
+    };
+};
+
+const getOriginRaw = (canvasSize: Dimensions): Pos2D => {
+    return {
+        x: canvasSize.width / 2 - Tile.TILE_WIDTH / 2,
+        y: canvasSize.height / 2 - Tile.TILE_HEIGHT - MAGIC_NUMBER_TO_ADJUST,
+    };
+};
+
+export const drawPoint = (
+    ctx: CanvasRenderingContext2D,
+    point: Pos2D,
+    color: string,
+    radius: number = 10
+) => {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.beginPath(); // Start a new path
+    ctx.arc(point.x - radius / 2, point.y - radius / 2, radius, 0, 2 * Math.PI);
+    ctx.fill(); // Fill the circle
+    ctx.restore();
+};
+
+const checkTransformMatChanged = (
+    prevTransformMat: DOMMatrix | null,
+    transformMat: DOMMatrix
+) => {
+    if (prevTransformMat === null) return true;
+    return (
+        prevTransformMat.a !== transformMat.a ||
+        prevTransformMat.b !== transformMat.b ||
+        prevTransformMat.c !== transformMat.c ||
+        prevTransformMat.d !== transformMat.d ||
+        prevTransformMat.e !== transformMat.e ||
+        prevTransformMat.f !== transformMat.f
+    );
+};
+
+const drawLine = (
+    ctx: CanvasRenderingContext2D,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    color = "gray",
+    lineWidth = 1,
+    transform: DOMMatrix = DEFAULT_TRANSFORM_MATRIX,
+    lineDash = []
+) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash(lineDash);
+    ctx.stroke();
+    ctx.setLineDash([]); // Reset line dash to solid line
+    ctx.restore();
+};
+
+/**
+ * Draw tile using pos as middle-left corner of projected bounding box,
+ * bc it is the bottom-left corner of the tile in isometric view.
+ */
+const drawTileOutline = (
+    ctx: CanvasRenderingContext2D,
+    pos: Pos2D,
+    dim: Dimensions,
+    lineColor = "rgba(255,255,255,0.4)",
+    fillStyle = "rgba(25,34, 44,0.2)",
+    lineWidth = 1,
+    lineDash = [5, 2]
+) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.setLineDash(lineDash);
+    ctx.strokeStyle = lineColor;
+    ctx.fillStyle = fillStyle;
+    ctx.lineWidth = lineWidth;
+    ctx.moveTo(pos.x, pos.y);
+    ctx.lineTo(pos.x + dim.width / 2, pos.y - dim.height / 2);
+    ctx.lineTo(pos.x + dim.width, pos.y);
+    ctx.lineTo(pos.x + dim.width / 2, pos.y + dim.height / 2);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    ctx.fill();
+    ctx.restore();
+};
+
+const renderTileHover = (
+    ctx: CanvasRenderingContext2D,
+    isoX: number,
+    isoY: number
+) => {
+    drawTileOutline(
+        ctx,
+        { x: isoX, y: isoY },
+        { width: Tile.TILE_WIDTH, height: Tile.TILE_HEIGHT },
+        "rgba(11, 94, 184, 0.8)",
+        "rgba(22, 219, 245, 0.4)",
+        2,
+        []
+    );
+
+    // ctx.beginPath();
+    // ctx.setLineDash([]);
+    // ctx.strokeStyle = "rgba(192, 57, 43, 0.8)";
+    // ctx.fillStyle = "rgba(192, 57, 43, 0.4)";
+    // ctx.lineWidth = 2;
+    // ctx.moveTo(isoX, isoY);
+    // ctx.lineTo(isoX + Tile.TILE_WIDTH / 2, isoY - Tile.TILE_HEIGHT / 2);
+    // ctx.lineTo(isoX + Tile.TILE_WIDTH, isoY);
+    // ctx.lineTo(isoX + Tile.TILE_WIDTH / 2, isoY + Tile.TILE_HEIGHT / 2);
+    // ctx.lineTo(isoX, isoY);
+    // ctx.stroke();
+    // ctx.fill();
+};
+
+const drawSquare = (
+    ctx: CanvasRenderingContext2D,
+    pos: Pos2D,
+    dim: Dimensions,
+    lineColor = "rgba(255,255,255,0.4)",
+    lineWidth = 1
+) => {
+    ctx.save();
+    ctx.beginPath();
+    // ctx.setLineDash([5, 2]);
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = lineWidth;
+    ctx.rect(pos.x, pos.y, dim.width, dim.height);
+    ctx.stroke();
+    ctx.restore();
 };
